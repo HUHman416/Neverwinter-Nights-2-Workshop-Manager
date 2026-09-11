@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nwn2-workshop-manager"
+version = "0.1.0"
+description = "A safe Linux GUI for managing Neverwinter Nights 2 Enhanced Edition Steam Workshop mods"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "HUHman416"}]
+keywords = ["NWN2", "Steam Workshop", "mods", "Linux", "Bazzite"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: X11 Applications",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: Games/Entertainment",
+]
+
+[project.gui-scripts]
+nwn2-workshop-manager = "nwn2_workshop_manager.__main__:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+

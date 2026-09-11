@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=NWN2 Workshop Manager
+Comment=Safely install and manage NWN2 Enhanced Edition Workshop mods
+Exec=nwn2-workshop-manager
+Icon=nwn2-workshop-manager
+Terminal=false
+Categories=Game;
+Keywords=NWN2;Neverwinter;Workshop;Mods;Steam;
+StartupNotify=true

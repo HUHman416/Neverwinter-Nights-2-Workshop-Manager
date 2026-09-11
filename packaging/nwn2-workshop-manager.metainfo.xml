@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.HUHman416.NWN2WorkshopManager</id>
+  <name>NWN2 Workshop Manager</name>
+  <summary>Safely manage NWN2 Enhanced Edition Steam Workshop mods</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>
+      A Bazzite-friendly Linux GUI that installs enabled Neverwinter Nights 2:
+      Enhanced Edition Workshop items, tracks file ownership, resolves conflicts
+      by priority, and restores original files after mods are removed.
+    </p>
+  </description>
+  <launchable type="desktop-id">nwn2-workshop-manager.desktop</launchable>
+  <url type="homepage">https://github.com/HUHman416/Neverwinter-Nights-2-Workshop-Manager</url>
+  <provides>
+    <binary>nwn2-workshop-manager</binary>
+  </provides>
+  <releases>
+    <release version="0.1.0" date="2026-09-11"/>
+  </releases>
+</component>

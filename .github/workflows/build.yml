@@ -39,13 +39,20 @@ jobs:
             release/NWN2-Workshop-Manager-x86_64.AppImage.sha256
           if-no-files-found: error
 
-      - name: Publish tagged release
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Publish version release
+        if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            release/NWN2-Workshop-Manager-x86_64.AppImage \
-            release/NWN2-Workshop-Manager-x86_64.AppImage.sha256 \
-            --title "NWN2 Workshop Manager ${GITHUB_REF_NAME}" \
-            --generate-notes
+          VERSION="$(PYTHONPATH=src python3 -c 'from nwn2_workshop_manager import VERSION; print(VERSION)')"
+          TAG="v${VERSION}"
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists; leaving its verified assets unchanged."
+          else
+            gh release create "${TAG}" \
+              release/NWN2-Workshop-Manager-x86_64.AppImage \
+              release/NWN2-Workshop-Manager-x86_64.AppImage.sha256 \
+              --target "${GITHUB_SHA}" \
+              --title "NWN2 Workshop Manager ${TAG}" \
+              --generate-notes
+          fi

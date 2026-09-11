@@ -104,9 +104,8 @@ Build the AppImage:
 ./scripts/build_appimage.sh
 ```
 
-The GitHub Actions workflow tests every push and pull request, publishes the AppImage as a workflow artifact, and creates a GitHub release automatically for `v*` tags.
+The GitHub Actions workflow tests every push and pull request, publishes the AppImage as a workflow artifact, and creates a release automatically when the version number is new. It also supports explicit `v*` tag builds.
 
 ## License
 
 MIT
-

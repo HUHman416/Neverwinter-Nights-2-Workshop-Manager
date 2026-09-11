@@ -13,7 +13,14 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="print the planned changes as JSON")
     parser.add_argument("--sync", action="store_true", help="synchronize without opening the GUI")
     parser.add_argument("--version", action="store_true", help="print the version")
+    parser.add_argument("--check-updates", action="store_true", help="check GitHub over verified HTTPS without opening the GUI")
     args = parser.parse_args()
+    if args.check_updates:
+        from .core import VERSION
+        from .updater import check_release
+
+        print(json.dumps(check_release(VERSION)))
+        return 0
     if args.version:
         from .core import VERSION
 

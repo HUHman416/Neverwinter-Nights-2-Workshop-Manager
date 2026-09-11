@@ -15,7 +15,7 @@ APP_ID = "2738630"
 APP_NAME = "NWN2 Workshop Manager"
 APP_SLUG = "nwn2-workshop-manager"
 GAME_DOCUMENTS = "Neverwinter Nights 2"
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 
 
 class ManagerError(RuntimeError):

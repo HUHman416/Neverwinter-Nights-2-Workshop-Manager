@@ -19,6 +19,12 @@ A Linux desktop app for safely managing **Neverwinter Nights 2: Enhanced Edition
 
 ## Install and run
 
+**Updating from 0.3.0 or earlier after a certificate error:** download 0.3.1 or newer
+manually once. Existing settings and backups carry over. The corrected updater
+loads Fedora/Bazzite and other Linux system CA bundles, with packaged Certifi roots
+as a fallback. Certificate and hostname verification remain enabled. Explicit
+`SSL_CERT_FILE`/`SSL_CERT_DIR` settings are honored.
+
 1. Download `NWN2-Workshop-Manager-x86_64.AppImage` from the latest GitHub release.
 2. Make it executable:
 
@@ -135,7 +141,7 @@ The app only manages files supplied by enabled Workshop item directories. It doe
 
 ## Development
 
-Python 3.10+ with Tk is required. No third-party runtime package is used by the app.
+Python 3.10+ with Tk is required. Certifi supplies the packaged CA fallback.
 
 ```bash
 python3 -m venv .venv

@@ -5,9 +5,12 @@ import hashlib
 import json
 import os
 import re
+import ssl
 import tempfile
 import urllib.request
 from pathlib import Path
+
+import certifi
 
 REPO = "HUHman416/Neverwinter-Nights-2-Workshop-Manager"
 ASSET = "NWN2-Workshop-Manager-x86_64.AppImage"
@@ -19,10 +22,34 @@ def version_tuple(value):
     return tuple(map(int, value.lstrip("v").split(".")))
 
 
+SYSTEM_CA_FILES = (
+    "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+    "/etc/pki/tls/certs/ca-bundle.crt",
+    "/etc/ssl/certs/ca-certificates.crt",
+    "/etc/ssl/cert.pem",
+)
+
+
+def tls_context():
+    # Honor explicitly configured trust stores without silently overriding them.
+    cafile = os.environ.get("SSL_CERT_FILE")
+    capath = os.environ.get("SSL_CERT_DIR")
+    if cafile or capath:
+        return ssl.create_default_context(cafile=cafile or None, capath=capath or None)
+    # Frozen Ubuntu Python defaults may not exist on Fedora/Bazzite.
+    for candidate in SYSTEM_CA_FILES:
+        if Path(candidate).is_file():
+            try:
+                return ssl.create_default_context(cafile=candidate)
+            except (OSError, ssl.SSLError):
+                continue
+    return ssl.create_default_context(cafile=certifi.where())
+
+
 def request(url):
     return urllib.request.urlopen(urllib.request.Request(url, headers={
         "User-Agent": "NWN2-Workshop-Manager", "Accept": "application/vnd.github+json"
-    }), timeout=30)
+    }), timeout=30, context=tls_context())
 
 
 def check_release(current):

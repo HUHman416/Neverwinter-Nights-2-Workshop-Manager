@@ -60,6 +60,7 @@ mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/applications" \
     --name nwn2-workshop-manager \
     --paths "$PROJECT_DIR/src" \
     --add-data "$PROJECT_DIR/assets:assets" \
+    --collect-data certifi \
     "${EXTRA_BINARY_ARGS[@]}" \
     --distpath "$DIST_DIR" \
     --workpath "$BUILD_DIR/pyinstaller" \

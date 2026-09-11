@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1 - 2026-09-11
+
+- Fix updater certificate discovery on Fedora/Bazzite with explicit system trust paths.
+- Bundle Certifi's public root certificates for systems without a readable CA bundle.
+- Preserve certificate and hostname verification and explicit SSL trust overrides.
+- Verify a real HTTPS update check from the packaged AppImage in CI.
+
 ## 0.3.0 - 2026-09-11
 
 - Restore the host library environment when launching external applications.

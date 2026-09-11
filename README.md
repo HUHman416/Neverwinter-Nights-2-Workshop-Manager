@@ -53,6 +53,27 @@ Nothing is blindly deleted during this initialization.
 
 ## Everyday workflow
 
+### 0.3.0 launch and conflict improvements
+
+Steam actions use native Steam with `-applaunch 2738630`, with Flatpak and desktop
+URI-handler fallbacks. External programs get the host library environment instead
+of the AppImage's bundled libraries. Failures appear in a dialog; details are in
+`~/.local/share/nwn2-workshop-manager/launch.log`. A successful request means the
+launcher accepted it, not that the game has finished starting.
+
+File Conflicts labels byte-identical files as **Identical duplicate**. Other entries
+show **Priority overlap** or **Custom winner**, and **Pending** or **Applied**.
+Applied means the selected file is installed; it does not guarantee that two mods
+are compatible. Identical duplicates remain visible for inspection.
+
+**Apply Priority Winners** resets custom winners and opens the change preview.
+Click **Sync These Changes**, then confirm, to apply it. **Inspect Versions** shows
+each source path, a bounded text preview (binary files are labeled), folder buttons,
+and the provider's win/loss totals across overlapping files.
+
+Scan status reports entries/files and elapsed time. Comparing overlaps reads their
+contents the first time, then caches the result until file metadata changes.
+
 ### Faster scans and manager updates (v0.2.0)
 
 The first scan builds a mod file-list cache. Later scans reuse entries whose Steam

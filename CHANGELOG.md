@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0 - 2026-09-11
+
+- Restore the host library environment when launching external applications.
+- Native Steam `-applaunch`, Flatpak Steam fallback, browser fallback for Workshop pages,
+  and visible failure messages with a launch log.
+- Separate identical duplicates, priority overlaps, and custom winners; show pending/applied state.
+- Apply Priority Winners opens the file-change preview with sync confirmation.
+- Inspect every provider's file preview, source folder, and overlap win/loss counts.
+- Cache overlap comparisons; show file counts and elapsed time while scanning/comparing.
+
 ## 0.2.0 - 2026-09-11
 
 - Cache mod file lists against Steam per-item manifest metadata; rescan changed items.

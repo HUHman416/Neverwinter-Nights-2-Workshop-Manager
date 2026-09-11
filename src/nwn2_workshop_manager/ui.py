@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
@@ -35,6 +36,7 @@ from .core import (
     set_mod_enabled,
     sync,
 )
+from .launcher import launch
 from .updater import check_release, download_release
 
 BG = "#101319"
@@ -52,12 +54,9 @@ BORDER = "#343e4d"
 
 
 def _open_target(target: str | Path) -> None:
-    subprocess.Popen(
-        ["xdg-open", str(target)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    app = tk._default_root
+    if app:
+        app.launch_target(str(target))
 
 
 def _asset_path(name: str) -> Path:
@@ -137,6 +136,18 @@ class PillButton(tk.Button):
 
 
 class ManagerApp(tk.Tk):
+    def launch_target(self, target):
+        if self._busy and target.startswith("steam://rungameid/"):
+            messagebox.showinfo("Please wait", "Wait for the current operation to finish before launching NWN2.", parent=self)
+            return
+        def worker():
+            try:
+                result = launch(target, self.store.state_dir / "launch.log")
+                self._events.put(("launch-ok", None, result))
+            except Exception as exc:  # noqa: BLE001 - surface external launch failures
+                self._events.put(("launch-error", None, str(exc)))
+        threading.Thread(target=worker, daemon=True).start()
+
     def __init__(self):
         super().__init__()
         self.title(f"{APP_NAME} {VERSION}")
@@ -429,6 +440,9 @@ class ManagerApp(tk.Tk):
     def _set_busy(self, busy: bool, text: str = "Working…") -> None:
         self._busy = busy
         if busy:
+            self._started_at = time.monotonic()
+            self._operation_text = text
+            self.after(1000, self._tick_elapsed)
             self.set_status(text, "busy")
             self.progress.configure(mode="indeterminate")
             self.progress.pack(side="right", padx=12, pady=8)
@@ -436,6 +450,15 @@ class ManagerApp(tk.Tk):
         else:
             self.progress.stop()
             self.progress.pack_forget()
+
+    def _tick_elapsed(self):
+        if self._busy:
+            elapsed = int(time.monotonic() - self._started_at)
+            self.set_status(f"{self._operation_text} • {elapsed // 60}:{elapsed % 60:02d} elapsed", "busy")
+            self.after(1000, self._tick_elapsed)
+
+    def report_progress(self, current, total, text):
+        self._events.put(("progress", None, (current, total, text)))
 
     def run_async(self, work, success, label: str) -> None:
         if self._busy:
@@ -455,6 +478,12 @@ class ManagerApp(tk.Tk):
         try:
             while True:
                 event, callback, value = self._events.get_nowait()
+                if event.startswith("launch-"):
+                    if event == "launch-error":
+                        messagebox.showerror("Launch failed", value, parent=self)
+                    elif not self._busy:
+                        self.set_status(value)
+                    continue
                 if event in ("update-check", "update-error"):
                     self._update_busy = False
                     if event == "update-error":
@@ -469,7 +498,8 @@ class ManagerApp(tk.Tk):
                     current, total, path = value
                     self.progress.stop()
                     self.progress.configure(mode="determinate", maximum=total, value=current)
-                    self.set_status(f"Synchronizing {current}/{total} • {path}", "busy")
+                    self._operation_text = f"{current}/{total} • {path}"
+                    self.set_status(self._operation_text, "busy")
                     continue
                 self._set_busy(False)
                 if event == "success":
@@ -522,7 +552,7 @@ class ManagerApp(tk.Tk):
             PreviewDialog(self, plan)
 
         self.run_async(
-            lambda: build_sync_plan(self.settings, self.store), done, "Calculating changes…"
+            lambda: build_sync_plan(self.settings, self.store, progress=self.report_progress), done, "Calculating changes…"
         )
 
     def sync_now(self) -> None:
@@ -576,7 +606,7 @@ class ManagerApp(tk.Tk):
             )
 
         self.run_async(
-            lambda: build_sync_plan(self.settings, self.store), after_plan, "Preparing sync…"
+            lambda: build_sync_plan(self.settings, self.store, progress=self.report_progress), after_plan, "Preparing sync…"
         )
 
 
@@ -610,7 +640,7 @@ class WorkshopPage(Page):
         for key, title in (
             ("mods", "SUBSCRIBED MODS"),
             ("files", "MANAGED FILES"),
-            ("conflicts", "FILE CONFLICTS"),
+            ("conflicts", "DIFFERING OVERLAPS"),
         ):
             card = tk.Frame(cards, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
             card.pack(side="left", fill="x", expand=True, padx=(0, 10) if key != "conflicts" else 0)
@@ -677,8 +707,8 @@ class WorkshopPage(Page):
         self.card_values["mods"].configure(text=str(len(mods)))
         managed = len(plan.winners) if plan else len(self.app.store.load_managed().get("files", {}))
         self.card_values["files"].configure(text=f"{managed:,}")
-        conflicts = len(plan.conflicts) if plan else sum(mod.conflict_count for mod in mods) // 2
-        self.card_values["conflicts"].configure(text=f"{conflicts:,}", fg=GOLD if conflicts else GREEN)
+        conflicts = sum(c.category != "Identical duplicate" for c in plan.conflicts) if plan else None
+        self.card_values["conflicts"].configure(text=f"{conflicts:,}" if conflicts is not None else "Run Preview", fg=GOLD if conflicts else GREEN)
         self._render_rows()
 
     def _render_rows(self) -> None:
@@ -773,17 +803,23 @@ class ConflictsPage(Page):
         super().__init__(parent, app)
         self.heading(
             "File Conflicts",
-            "The highest-priority enabled mod wins when subscriptions provide the same destination file.",
+            "Inspect overlaps, choose file winners, and track whether your choices have been applied.",
         )
         wrap = tk.Frame(self, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
         wrap.pack(fill="both", expand=True, padx=28, pady=(0, 18))
-        self.tree = ttk.Treeview(wrap, columns=("path", "winner", "overridden"), show="headings")
+        self.tree = ttk.Treeview(wrap, columns=("path", "winner", "overridden", "category", "status"), show="headings")
         self.tree.heading("path", text="DESTINATION FILE")
         self.tree.heading("winner", text="WINNER")
-        self.tree.heading("overridden", text="LOWER-PRIORITY PROVIDERS")
+        self.tree.heading("overridden", text="OTHER PROVIDERS")
         self.tree.column("path", width=430)
         self.tree.column("winner", width=155)
         self.tree.column("overridden", width=260)
+        self.tree.heading("category", text="TYPE")
+        self.tree.heading("status", text="STATE")
+        self.tree.column("path", width=240, minwidth=160)
+        self.tree.column("overridden", width=160, minwidth=90)
+        self.tree.column("category", width=130, minwidth=110)
+        self.tree.column("status", width=75, minwidth=65)
         scroll = ttk.Scrollbar(wrap, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
         self.tree.pack(side="left", fill="both", expand=True)
@@ -796,19 +832,52 @@ class ConflictsPage(Page):
         controls = tk.Frame(self, bg=BG)
         controls.pack(fill="x", padx=28, pady=(0, 18))
         PillButton(controls, "Choose Winner…", command=self.choose_winner, accent=True).pack(side="left")
-        PillButton(controls, "Auto-resolve by priority", command=self.auto_resolve).pack(side="left", padx=8)
+        PillButton(controls, "Apply Priority Winners", command=self.auto_resolve).pack(side="left", padx=8)
+        PillButton(controls, "Inspect Versions", command=self.inspect_versions).pack(side="left", padx=8)
         PillButton(controls, "Apply / Sync", command=app.sync_now).pack(side="right")
         self.tree.bind("<Double-1>", lambda event: self.choose_winner())
 
     def auto_resolve(self):
         if self.app._busy:
             return
-        if self.app.settings.file_winners and not messagebox.askyesno(
-                "Reset file choices?", "Clear all custom winners and use mod priority for every file?", parent=self):
+        if not messagebox.askyesno(
+                "Apply priority winners?", "Clear custom choices and use mod priority for every file? "
+                "A file-change preview will open next. Confirm Sync there to apply it.", parent=self):
             return
         self.app.settings.file_winners.clear()
         self.app.store.save(self.app.settings)
-        self.app.refresh(preview=True)
+        self.app.preview_changes()
+
+    def inspect_versions(self):
+        if self.app._busy or not self.app.plan or not self.tree.selection():
+            return
+        relative = self.tree.item(self.tree.selection()[0], "values")[0]
+        plan = self.app.plan
+        conflict = next(c for c in plan.conflicts if c.relative_path == relative)
+        dialog = tk.Toplevel(self)
+        dialog.title("Inspect file versions")
+        dialog.configure(bg=BG)
+        dialog.geometry("760x520")
+        text = tk.Text(dialog, bg=PANEL, fg=TEXT, wrap="word")
+        text.pack(fill="both", expand=True, padx=16, pady=16)
+        text.insert("end", f"{relative}\n{conflict.category} • {conflict.status}\n\n")
+        for mod in plan.mods:
+            if mod.mod_id not in conflict.providers:
+                continue
+            source = mod.files[relative]
+            wins = sum(1 for c in plan.conflicts if c.winner == mod.mod_id)
+            loses = sum(1 for c in plan.conflicts if mod.mod_id in c.providers and c.winner != mod.mod_id)
+            text.insert("end", f"{mod.name} ({mod.mod_id}) — {'WINNER' if mod.mod_id == conflict.winner else 'OVERRIDDEN'}\n"
+                        f"Across overlaps: {wins} wins / {loses} losses\n{source}\n")
+            try:
+                with source.open("rb") as handle:
+                    data = handle.read(8192)
+                preview = data.decode("utf-8") if b'\x00' not in data else "[Binary file; text preview unavailable]"
+                text.insert("end", preview + "\n[Preview limited to first 8 KiB]\n\n")
+            except (OSError, UnicodeError):
+                text.insert("end", "[Binary or unreadable file]\n\n")
+            PillButton(dialog, f"Open {mod.mod_id} folder", command=lambda path=source.parent: _open_target(path)).pack(side="left", padx=8, pady=10)
+        text.configure(state="disabled")
 
     def choose_winner(self):
         if self.app._busy or not self.app.plan:
@@ -853,11 +922,13 @@ class ConflictsPage(Page):
             self.tree.insert(
                 "",
                 "end",
-                values=(conflict.relative_path, names.get(conflict.winner, conflict.winner), ", ".join(losers)),
+                values=(conflict.relative_path, names.get(conflict.winner, conflict.winner), ", ".join(losers), conflict.category, conflict.status),
             )
         self.summary.configure(
             text=(
-                f"{len(plan.conflicts):,} overlapping file(s). Each has a winner; custom choices override priority."
+                f"{sum(c.status == 'Pending' for c in plan.conflicts)} pending • "
+                f"{sum(c.status == 'Applied' for c in plan.conflicts)} applied • "
+                f"{sum(c.category == 'Identical duplicate' for c in plan.conflicts)} identical duplicates"
                 if plan.conflicts
                 else "No file conflicts among enabled mods."
             ),

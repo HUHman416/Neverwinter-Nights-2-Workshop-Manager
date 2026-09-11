@@ -7,7 +7,7 @@ import re
 import shutil
 import tempfile
 from collections.abc import Callable, Iterable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 
@@ -15,7 +15,7 @@ APP_ID = "2738630"
 APP_NAME = "NWN2 Workshop Manager"
 APP_SLUG = "nwn2-workshop-manager"
 GAME_DOCUMENTS = "Neverwinter Nights 2"
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 
 class ManagerError(RuntimeError):
@@ -86,6 +86,8 @@ class Conflict:
     relative_path: str
     providers: tuple[str, ...]
     winner: str
+    category: str = "Priority overlap"
+    status: str = "Pending"
 
 
 @dataclass(frozen=True)
@@ -374,7 +376,12 @@ def scan_mods(settings: Settings, store: ConfigStore | None = None, full: bool =
         total_size = 0
         skipped = 0
         try:
-            paths = sorted(mod_dir.rglob("*"), key=lambda path: path.as_posix().casefold())
+            paths = []
+            for count, path in enumerate(mod_dir.rglob("*"), 1):
+                paths.append(path)
+                if progress and count % 200 == 0:
+                    progress(index + 1, len(mod_dirs), f"Scanning mod {mod_dir.name}: {count:,} entries")
+            paths.sort(key=lambda path: path.as_posix().casefold())
         except OSError as exc:
             raise SyncSafetyError(f"Could not read Workshop item {mod_dir.name}: {exc}") from exc
         for source in paths:
@@ -511,11 +518,26 @@ def build_sync_plan(settings: Settings, store: ConfigStore, full: bool = False, 
     for relative, preferred in settings.file_winners.items():
         if preferred in provider_map.get(relative, []):
             winner_map[relative] = (preferred, by_id[preferred].files[relative])
-    conflicts = [
-        Conflict(relative, values, winner_map[relative][0])
-        for relative, values in providers.items()
-        if len(values) > 1
-    ]
+    comparisons_path = store.state_dir / "conflict-cache.json"
+    comparisons = _read_json(comparisons_path, {})
+    fresh_comparisons = {}
+    conflicts = []
+    overlaps = [(rel, ids) for rel, ids in providers.items() if len(ids) > 1]
+    for index, (relative, values) in enumerate(overlaps, 1):
+        if progress:
+            progress(index, len(overlaps), f"Comparing overlap {relative}")
+        sources = [by_id[mod_id].files[relative] for mod_id in values]
+        signature = [[str(src), file_stamp(src)] for src in sources]
+        cached = comparisons.get(relative, {})
+        if not full and cached.get("signature") == signature and all(stamp for _, stamp in signature):
+            identical = cached.get("identical", False)
+        else:
+            identical = all(_files_equal(sources[0], src) for src in sources[1:])
+        fresh_comparisons[relative] = {"signature": signature, "identical": identical}
+        category = "Identical duplicate" if identical else (
+            "Custom winner" if settings.file_winners.get(relative) == winner_map[relative][0] else "Priority overlap")
+        conflicts.append(Conflict(relative, values, winner_map[relative][0], category))
+    _atomic_write_json(comparisons_path, fresh_comparisons)
     conflict_paths_by_mod: dict[str, int] = {}
     for conflict in conflicts:
         for mod_id in conflict.providers:
@@ -538,7 +560,9 @@ def build_sync_plan(settings: Settings, store: ConfigStore, full: bool = False, 
     actions: list[PlanAction] = []
     unchanged = 0
 
-    for relative, (mod_id, source) in sorted(winner_map.items()):
+    for index, (relative, (mod_id, source)) in enumerate(sorted(winner_map.items()), 1):
+        if progress and (index % 100 == 0 or index == len(winner_map)):
+            progress(index, len(winner_map), f"Checking file {index:,}/{len(winner_map):,}: {relative}")
         destination = _safe_target(settings.destination, relative)
         old_winner = old_files.get(relative, {}).get("winner", "")
         old = old_files.get(relative, {})
@@ -565,6 +589,9 @@ def build_sync_plan(settings: Settings, store: ConfigStore, full: bool = False, 
         elif destination.exists() or destination.is_symlink():
             actions.append(PlanAction("remove", relative, old.get("winner", ""), "No subscribed mod owns this file"))
 
+    pending = {action.relative_path for action in actions}
+    conflicts = [replace(conflict, status="Pending" if conflict.relative_path in pending else "Applied")
+                 for conflict in conflicts]
     return SyncPlan(
         mods=mods,
         winners=winner_map,
@@ -661,7 +688,7 @@ def sync(
         )
 
     with FileLock(store.lock_file):
-        plan = build_sync_plan(settings, store)
+        plan = build_sync_plan(settings, store, progress=progress)
         managed = store.load_managed()
         old_files: dict[str, dict] = managed.get("files", {})
         baselines = store.load_baselines()

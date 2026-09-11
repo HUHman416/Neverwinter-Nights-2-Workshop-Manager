@@ -15,7 +15,7 @@ APP_ID = "2738630"
 APP_NAME = "NWN2 Workshop Manager"
 APP_SLUG = "nwn2-workshop-manager"
 GAME_DOCUMENTS = "Neverwinter Nights 2"
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 
 class ManagerError(RuntimeError):
@@ -43,6 +43,8 @@ class Settings:
     priority_low_to_high: list[str] = field(default_factory=list)
     aliases: dict[str, str] = field(default_factory=dict)
     auto_preview: bool = True
+    check_updates: bool = True
+    file_winners: dict[str, str] = field(default_factory=dict)
 
     @property
     def workshop(self) -> Path:
@@ -329,7 +331,7 @@ def _mod_display_name(mod_id: str, settings: Settings) -> str:
     return alias or f"Workshop Item {mod_id}"
 
 
-def scan_mods(settings: Settings) -> tuple[list[ModInfo], list[str]]:
+def scan_mods(settings: Settings, store: ConfigStore | None = None, full: bool = False, progress=None) -> tuple[list[ModInfo], list[str]]:
     validate_settings(settings)
     warnings: list[str] = []
     mod_dirs = sorted(
@@ -340,16 +342,41 @@ def scan_mods(settings: Settings) -> tuple[list[ModInfo], list[str]]:
     ranks = {mod_id: index for index, mod_id in enumerate(order)}
     disabled = set(settings.disabled_mods)
     mods: list[ModInfo] = []
+    cache_path = (store or ConfigStore()).state_dir / "scan-cache.json"
+    cache = _read_json(cache_path, {})
+    if cache.get("root") != str(settings.workshop.resolve()):
+        cache = {}
+    cached = cache.get("items", {})
+    manifest = settings.workshop.parent.parent / f"appworkshop_{APP_ID}.acf"
+    try:
+        manifest_text = manifest.read_text(encoding="utf-8")
+    except OSError:
+        manifest_text = ""
+    fresh = {}
 
-    for mod_dir in mod_dirs:
+    for index, mod_dir in enumerate(mod_dirs):
+        if mod_dir.is_symlink():
+            continue
+        if progress:
+            progress(index + 1, len(mod_dirs), f"Checking mod {mod_dir.name}")
+        # Each Steam item has a flat installed-metadata block containing its
+        # content manifest and update time. Include every block for this ID.
+        blocks = re.findall(r'"' + re.escape(mod_dir.name) + r'"\s*\{([^{}]*)\}', manifest_text)
+        signature = [blocks, mod_dir.stat().st_mtime_ns]
+        previous = cached.get(mod_dir.name, {})
+        if blocks and not full and previous.get("signature") == signature:
+            files = {rel: mod_dir / src for rel, src in previous["files"].items()}
+            mods.append(ModInfo(mod_dir.name, _mod_display_name(mod_dir.name, settings), mod_dir,
+                                files, previous["size"], mod_dir.name not in disabled, ranks[mod_dir.name]))
+            fresh[mod_dir.name] = previous
+            continue
         files: dict[str, Path] = {}
         total_size = 0
         skipped = 0
         try:
             paths = sorted(mod_dir.rglob("*"), key=lambda path: path.as_posix().casefold())
         except OSError as exc:
-            warnings.append(f"Could not read Workshop item {mod_dir.name}: {exc}")
-            continue
+            raise SyncSafetyError(f"Could not read Workshop item {mod_dir.name}: {exc}") from exc
         for source in paths:
             if source.is_symlink():
                 skipped += 1
@@ -378,7 +405,18 @@ def scan_mods(settings: Settings) -> tuple[list[ModInfo], list[str]]:
                 skipped_symlinks=skipped,
             )
         )
+        fresh[mod_dir.name] = {"signature": signature, "size": total_size,
+                              "files": {rel: str(src.relative_to(mod_dir)) for rel, src in files.items()}}
+    _atomic_write_json(cache_path, {"root": str(settings.workshop.resolve()), "items": fresh})
     return mods, warnings
+
+
+def file_stamp(path: Path) -> list[int] | None:
+    try:
+        st = path.stat()
+        return [st.st_size, st.st_mtime_ns, st.st_ctime_ns]
+    except OSError:
+        return None
 
 
 def _files_equal(first: Path, second: Path) -> bool:
@@ -455,10 +493,10 @@ def maybe_import_legacy_state(settings: Settings, store: ConfigStore) -> bool:
     return True
 
 
-def build_sync_plan(settings: Settings, store: ConfigStore) -> SyncPlan:
+def build_sync_plan(settings: Settings, store: ConfigStore, full: bool = False, progress=None) -> SyncPlan:
     validate_settings(settings)
     maybe_import_legacy_state(settings, store)
-    mods, warnings = scan_mods(settings)
+    mods, warnings = scan_mods(settings, store, full, progress)
 
     enabled = sorted((mod for mod in mods if mod.enabled), key=lambda mod: mod.priority)
     provider_map: dict[str, list[str]] = {}
@@ -469,8 +507,12 @@ def build_sync_plan(settings: Settings, store: ConfigStore) -> SyncPlan:
             winner_map[relative] = (mod.mod_id, source)
 
     providers = {relative: tuple(values) for relative, values in provider_map.items()}
+    by_id = {mod.mod_id: mod for mod in enabled}
+    for relative, preferred in settings.file_winners.items():
+        if preferred in provider_map.get(relative, []):
+            winner_map[relative] = (preferred, by_id[preferred].files[relative])
     conflicts = [
-        Conflict(relative, values, values[-1])
+        Conflict(relative, values, winner_map[relative][0])
         for relative, values in providers.items()
         if len(values) > 1
     ]
@@ -499,6 +541,12 @@ def build_sync_plan(settings: Settings, store: ConfigStore) -> SyncPlan:
     for relative, (mod_id, source) in sorted(winner_map.items()):
         destination = _safe_target(settings.destination, relative)
         old_winner = old_files.get(relative, {}).get("winner", "")
+        old = old_files.get(relative, {})
+        if (not full and old_winner == mod_id and old.get("source_stamp") == file_stamp(source)
+                and old.get("destination_stamp") == file_stamp(destination)
+                and old.get("source_stamp") is not None):
+            unchanged += 1
+            continue
         if not destination.exists():
             actions.append(PlanAction("install", relative, mod_id, "File is not installed"))
         elif old_winner != mod_id or not _files_equal(source, destination):
@@ -652,12 +700,14 @@ def sync(
         total = max(1, len(plan.winners) + len(set(old_files) - set(plan.winners)))
         completed = 0
         new_files: dict[str, dict] = {}
+        changed = {action.relative_path for action in plan.actions}
 
         for relative, (mod_id, source) in sorted(plan.winners.items()):
             destination = _safe_target(settings.destination, relative)
             was_present = destination.exists()
-            was_same = was_present and _files_equal(source, destination)
-            _atomic_copy(source, destination)
+            was_same = relative not in changed
+            if not was_same:
+                _atomic_copy(source, destination)
             if not was_present:
                 result.installed += 1
                 result.messages.append(f"Installed {relative}")
@@ -668,6 +718,8 @@ def sync(
                 "winner": mod_id,
                 "providers": list(plan.providers.get(relative, (mod_id,))),
                 "source_relative": normalize_relative_path(source.relative_to(settings.workshop / mod_id)),
+                "source_stamp": file_stamp(source),
+                "destination_stamp": file_stamp(destination),
             }
             completed += 1
             if progress:

@@ -21,7 +21,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3 python3-pip python3-tk libfuse2
+          sudo apt-get install -y python3 python3-pip python3-tk libfuse2 xvfb
           python3 -m pip install --user -r requirements-build.txt
 
       - name: Run unit tests
@@ -29,6 +29,11 @@ jobs:
 
       - name: Build AppImage
         run: ./scripts/build_appimage.sh
+
+      - name: Smoke-test GUI and packaged runtime
+        run: |
+          PYTHONPATH=src xvfb-run -a python3 tests/gui_smoke.py
+          APPIMAGE_EXTRACT_AND_RUN=1 ./release/NWN2-Workshop-Manager-x86_64.AppImage --version
 
       - name: Upload AppImage artifact
         uses: actions/upload-artifact@v4

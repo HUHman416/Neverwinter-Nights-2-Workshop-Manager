@@ -35,6 +35,7 @@ from .core import (
     set_mod_enabled,
     sync,
 )
+from .updater import check_release, download_release
 
 BG = "#101319"
 SIDEBAR = "#171b23"
@@ -68,7 +69,7 @@ def _asset_path(name: str) -> Path:
     return candidates[0]
 
 
-def install_desktop_entry() -> Path:
+def install_desktop_entry(appimage: str | None = None) -> Path:
     applications = Path.home() / ".local/share/applications"
     icons = Path.home() / ".local/share/icons/hicolor/scalable/apps"
     applications.mkdir(parents=True, exist_ok=True)
@@ -76,8 +77,8 @@ def install_desktop_entry() -> Path:
     icon_target = icons / f"{APP_SLUG}.svg"
     shutil.copy2(_asset_path("nwn2-workshop-manager.svg"), icon_target)
 
-    executable = os.environ.get("APPIMAGE", sys.executable)
-    if not os.environ.get("APPIMAGE") and not getattr(sys, "frozen", False):
+    executable = appimage or os.environ.get("APPIMAGE", sys.executable)
+    if not appimage and not os.environ.get("APPIMAGE") and not getattr(sys, "frozen", False):
         exec_line = f"{shlex.quote(sys.executable)} -m nwn2_workshop_manager"
     else:
         escaped = executable.replace('"', '\\"')
@@ -148,12 +149,54 @@ class ManagerApp(tk.Tk):
         self.mods: list[ModInfo] = []
         self.plan: SyncPlan | None = None
         self._busy = False
+        self._update_busy = False
         self._events: queue.Queue = queue.Queue()
 
         self._configure_styles()
         self._build_shell()
         self.after(100, self._startup)
         self.after(100, self._poll_events)
+        self.after(4000, lambda: self.check_for_updates(False) if self.settings.check_updates else None)
+
+    def check_for_updates(self, manual=True):
+        if self._update_busy:
+            return
+        self._update_busy = True
+
+        def worker():
+            try:
+                result = check_release(VERSION)
+                self._events.put(("update-check", manual, result))
+            except Exception as exc:  # noqa: BLE001 - report network/metadata errors in Tk
+                self._events.put(("update-error", manual, str(exc)))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def offer_update(self, release):
+        if not release:
+            return
+        if self._busy:
+            self.after(3000, lambda: self.offer_update(release))
+            return
+        if not messagebox.askyesno("Manager update available",
+                f"Download {release['version']}? The checksum will be verified. "
+                "Your current AppImage and mod settings will be kept.", parent=self):
+            return
+
+        def done(path):
+            self.set_status(f"Update ready: {path.name}")
+            shortcut = Path.home() / ".local/share/applications" / f"{APP_SLUG}.desktop"
+            if shortcut.exists():
+                install_desktop_entry(str(path))
+            if messagebox.askyesno("Update ready", "Restart into the new version now?", parent=self):
+                env = os.environ.copy()
+                for key in list(env):
+                    if key.startswith("_PYI") or key in ("APPIMAGE", "APPDIR", "LD_LIBRARY_PATH", "TCL_LIBRARY", "TK_LIBRARY"):
+                        env.pop(key, None)
+                env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+                subprocess.Popen([str(path)], env=env, start_new_session=True)
+                self.destroy()
+        self.run_async(lambda: download_release(release, self.store.state_dir / "updates"),
+                       done, "Downloading and verifying manager update…")
 
     def _configure_styles(self) -> None:
         style = ttk.Style(self)
@@ -412,6 +455,16 @@ class ManagerApp(tk.Tk):
         try:
             while True:
                 event, callback, value = self._events.get_nowait()
+                if event in ("update-check", "update-error"):
+                    self._update_busy = False
+                    if event == "update-error":
+                        if callback:
+                            messagebox.showerror("Update check failed", value, parent=self)
+                    elif value:
+                        self.offer_update(value)
+                    elif callback:
+                        messagebox.showinfo("Up to date", f"You are running v{VERSION}.", parent=self)
+                    continue
                 if event == "progress":
                     current, total, path = value
                     self.progress.stop()
@@ -428,11 +481,13 @@ class ManagerApp(tk.Tk):
             pass
         self.after(100, self._poll_events)
 
-    def refresh(self, preview: bool = False) -> None:
+    def refresh(self, preview: bool = False, full: bool = False) -> None:
+        def progress(current, total, text):
+            self._events.put(("progress", None, (current, total, text)))
         def work():
             if preview:
-                return build_sync_plan(self.settings, self.store)
-            mods, warnings = scan_mods(self.settings)
+                return build_sync_plan(self.settings, self.store, full, progress)
+            mods, warnings = scan_mods(self.settings, self.store, full, progress)
             return mods, warnings
 
         def done(value):
@@ -573,6 +628,7 @@ class WorkshopPage(Page):
         search.insert(0, "")
         self.search_var.trace_add("write", lambda *_: self._render_rows())
         PillButton(toolbar, "Refresh", command=lambda: app.refresh(False)).pack(side="left", padx=(0, 8))
+        PillButton(toolbar, "Full Verify", command=lambda: app.refresh(True, True)).pack(side="left", padx=(0, 8))
         PillButton(toolbar, "Preview", command=app.preview_changes).pack(side="left", padx=(0, 8))
         PillButton(toolbar, "Sync Now", command=app.sync_now, accent=True).pack(side="left")
 
@@ -737,6 +793,53 @@ class ConflictsPage(Page):
         self.summary = tk.Label(footer, text="Run Preview to inspect conflicts.", bg=BG, fg=MUTED)
         self.summary.pack(side="left")
         PillButton(footer, "Preview Again", command=app.preview_changes).pack(side="right")
+        controls = tk.Frame(self, bg=BG)
+        controls.pack(fill="x", padx=28, pady=(0, 18))
+        PillButton(controls, "Choose Winner…", command=self.choose_winner, accent=True).pack(side="left")
+        PillButton(controls, "Auto-resolve by priority", command=self.auto_resolve).pack(side="left", padx=8)
+        PillButton(controls, "Apply / Sync", command=app.sync_now).pack(side="right")
+        self.tree.bind("<Double-1>", lambda event: self.choose_winner())
+
+    def auto_resolve(self):
+        if self.app._busy:
+            return
+        if self.app.settings.file_winners and not messagebox.askyesno(
+                "Reset file choices?", "Clear all custom winners and use mod priority for every file?", parent=self):
+            return
+        self.app.settings.file_winners.clear()
+        self.app.store.save(self.app.settings)
+        self.app.refresh(preview=True)
+
+    def choose_winner(self):
+        if self.app._busy or not self.app.plan:
+            return
+        selection = self.tree.selection()
+        if not selection:
+            messagebox.showinfo("Select a conflict", "Select a file first, then choose its winner.", parent=self)
+            return
+        path = self.tree.item(selection[0], "values")[0]
+        conflict = next(c for c in self.app.plan.conflicts if c.relative_path == path)
+        dialog = tk.Toplevel(self)
+        dialog.title("Choose file winner")
+        dialog.configure(bg=BG)
+        dialog.transient(self.app)
+        tk.Label(dialog, text=path, bg=BG, fg=TEXT, wraplength=550).pack(padx=20, pady=18)
+        tk.Label(dialog, text="Select a version. Apply / Sync writes your choices to the game.", bg=BG, fg=MUTED).pack(padx=20)
+        names = {mod.mod_id: mod.name for mod in self.app.plan.mods}
+
+        def select(mod_id, all_files=False):
+            paths = [c.relative_path for c in self.app.plan.conflicts if mod_id in c.providers] if all_files else [path]
+            for relative in paths:
+                self.app.settings.file_winners[relative] = mod_id
+            self.app.store.save(self.app.settings)
+            dialog.destroy()
+            self.app.refresh(preview=True)
+
+        for mod_id in conflict.providers:
+            row = tk.Frame(dialog, bg=BG)
+            row.pack(fill="x", padx=20, pady=8)
+            PillButton(row, f"Use {names[mod_id]}", command=lambda mid=mod_id: select(mid)).pack(side="left")
+            PillButton(row, "Prefer for all its conflicts", command=lambda mid=mod_id: select(mid, True)).pack(side="right", padx=8)
 
     def set_plan(self, plan: SyncPlan | None) -> None:
         for item in self.tree.get_children():
@@ -746,7 +849,7 @@ class ConflictsPage(Page):
             return
         names = {mod.mod_id: mod.name for mod in plan.mods}
         for conflict in plan.conflicts:
-            losers = [names.get(mod_id, mod_id) for mod_id in conflict.providers[:-1]]
+            losers = [names.get(mod_id, mod_id) for mod_id in conflict.providers if mod_id != conflict.winner]
             self.tree.insert(
                 "",
                 "end",
@@ -754,7 +857,7 @@ class ConflictsPage(Page):
             )
         self.summary.configure(
             text=(
-                f"{len(plan.conflicts):,} conflict(s). Change priority on the Workshop Mods page."
+                f"{len(plan.conflicts):,} overlapping file(s). Each has a winner; custom choices override priority."
                 if plan.conflicts
                 else "No file conflicts among enabled mods."
             ),
@@ -860,6 +963,7 @@ class SettingsPage(Page):
         self.workshop_var = tk.StringVar()
         self.destination_var = tk.StringVar()
         self.auto_preview_var = tk.BooleanVar(value=True)
+        self.update_var = tk.BooleanVar(value=True)
         self._path_row(form, "WORKSHOP CONTENT FOLDER", self.workshop_var, self.choose_workshop)
         self._path_row(form, "NWN2 PROTON DOCUMENTS FOLDER", self.destination_var, self.choose_destination)
         options = tk.Frame(form, bg=PANEL)
@@ -867,11 +971,13 @@ class SettingsPage(Page):
         ttk.Checkbutton(
             options, text="Calculate a change preview on launch", variable=self.auto_preview_var
         ).pack(side="left")
+        ttk.Checkbutton(options, text="Check for manager updates on launch", variable=self.update_var).pack(side="left")
 
         actions = tk.Frame(self, bg=BG)
         actions.pack(fill="x", padx=28, pady=16)
         PillButton(actions, "Detect Steam Library", command=self.detect).pack(side="left")
         PillButton(actions, "Save Settings", command=self.save, accent=True).pack(side="left", padx=8)
+        PillButton(actions, "Check for Updates", command=app.check_for_updates).pack(side="left", padx=8)
 
         integration = tk.Frame(self, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
         integration.pack(fill="x", padx=28, pady=(10, 0))
@@ -907,6 +1013,7 @@ class SettingsPage(Page):
         self.workshop_var.set(self.app.settings.workshop_dir)
         self.destination_var.set(self.app.settings.destination_dir)
         self.auto_preview_var.set(self.app.settings.auto_preview)
+        self.update_var.set(self.app.settings.check_updates)
 
     def choose_workshop(self) -> None:
         selected = filedialog.askdirectory(
@@ -959,6 +1066,7 @@ class SettingsPage(Page):
         self.app.settings.workshop_dir = new_workshop
         self.app.settings.destination_dir = new_destination
         self.app.settings.auto_preview = self.auto_preview_var.get()
+        self.app.settings.check_updates = self.update_var.get()
         if old_paths != new_paths:
             self.app.settings.initialized = False
         try:

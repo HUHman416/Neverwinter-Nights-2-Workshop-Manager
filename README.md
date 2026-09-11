@@ -53,6 +53,31 @@ Nothing is blindly deleted during this initialization.
 
 ## Everyday workflow
 
+### Faster scans and manager updates (v0.2.0)
+
+The first scan builds a mod file-list cache. Later scans reuse entries whose Steam
+Workshop item metadata has not changed. Added/removed items are detected on Refresh
+or launch. If Steam's manifest is unavailable, the app falls back to scanning.
+Use **Full Verify** after manually adding files inside Workshop item folders.
+Ordinary previews use saved size and timestamps to avoid reading unchanged file contents.
+
+The manager checks GitHub for stable releases on launch (disable in Settings).
+**Check for Updates** also checks manually. Downloads require confirmation and a
+matching SHA-256 checksum; restart is optional. Updates live in the manager's
+data folder and the old AppImage remains intact. Existing Applications-menu
+shortcuts are redirected to the new version; opening the old downloaded file
+still runs the old version. Version 0.1.0 needs one manual upgrade to gain this feature.
+
+### One-click conflict tools
+
+In **File Conflicts**, select a file and click **Choose Winner** (or double-click).
+Click **Use [mod]** for that file, or **Prefer for all its conflicts** to choose that
+mod for every overlapping file it supplies. **Auto-resolve by priority** clears
+custom winners. **Apply / Sync** previews and confirms the actual file changes.
+Disabled or removed winners fall back to enabled providers. These tools select
+whole-file winners; they do not merge incompatible mod content. Overlapping files
+remain listed even after a winner is chosen, so you can revisit the choice.
+
 ### Add a mod
 
 Subscribe in Steam, wait for the download to finish, open the manager, then select **Preview** or **Sync Now**.
